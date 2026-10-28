@@ -1,10 +1,16 @@
 # CampusShare — Student Resource Sharing Platform
 ### Walchand College of Engineering, Sangli | Community Engagement Program (CEP)
 
+[![Live Demo](https://img.shields.io/badge/Live_Demo-GitHub_Pages-2ea44f?style=for-the-badge&logo=github)](https://prasadsuryawanshi185-crypto.github.io/campus-share/)
+[![GitHub Repository](https://img.shields.io/badge/GitHub-Repository-181717?style=for-the-badge&logo=github)](https://github.com/prasadsuryawanshi185-crypto/campus-share)
+
 [![React 19](https://img.shields.io/badge/React-19-blue.svg)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-8.3-646CFF.svg)](https://vite.dev/)
 [![Tailwind CSS v4](https://img.shields.io/badge/TailwindCSS-v4-38B2AC.svg)](https://tailwindcss.com/)
 [![Firebase](https://img.shields.io/badge/Firebase-Auth%20%26%20Firestore-FFA611.svg)](https://firebase.google.com/)
+
+> **Live Production Website:** [https://prasadsuryawanshi185-crypto.github.io/campus-share/](https://prasadsuryawanshi185-crypto.github.io/campus-share/)  
+> **Source Repository:** [https://github.com/prasadsuryawanshi185-crypto/campus-share](https://github.com/prasadsuryawanshi185-crypto/campus-share)
 
 ---
 
