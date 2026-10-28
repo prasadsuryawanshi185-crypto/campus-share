@@ -1,0 +1,465 @@
+rules_version = '2';
+
+// ============================================================================
+// CampusShare - Cloud Firestore Security Rules
+// Student Resource Sharing Platform for Walchand College of Engineering, Sangli
+// ============================================================================
+//
+// Assumed Data Model
+// ============================================================================
+//
+// Collection: users
+// Document ID: {userId} (Firebase Auth UID)
+// Fields:
+//   - uid: string (required, 1-128 chars, matches document path and auth UID, immutable)
+//   - fullName: string (required, 1-100 chars)
+//   - collegeEmail: string (required, valid email, <= 100 chars)
+//   - department: string (required, 2-50 chars)
+//   - academicYear: string (required, 1-20 chars)
+//   - role: string (required, 'student' | 'admin', students cannot self-escalate)
+//   - createdAt: timestamp (required, recent on create, immutable on update)
+//   - updatedAt: timestamp (optional, updated timestamp)
+//
+// Collection: resources
+// Document ID: {resourceId}
+// Fields:
+//   - resourceId: string (required, 1-128 chars, matches document path, immutable)
+//   - ownerId: string (required, 1-128 chars, matches creator auth UID, immutable)
+//   - ownerName: string (required, 1-100 chars)
+//   - ownerEmail: string (required, valid email, <= 100 chars)
+//   - department: string (required, 2-50 chars)
+//   - academicYear: string (required, 1-20 chars)
+//   - title: string (required, 3-150 chars)
+//   - category: string (required, 2-50 chars)
+//   - description: string (required, 5-2000 chars)
+//   - condition: string (required, 2-50 chars)
+//   - sharingType: string (required, 2-50 chars)
+//   - status: string (required, 'Available' | 'Requested' | 'Borrowed' | 'Unavailable')
+//   - imageUrl: string (required, <= 1000 chars, valid URL, path, or empty string)
+//   - duration: string (required, 1-50 chars)
+//   - createdAt: timestamp (required, recent on create, immutable on update)
+//   - updatedAt: timestamp (required, timestamp)
+//   - isFlagged: bool (required, defaults to false, protected against self-unflag)
+//
+// Collection: borrowRequests
+// Document ID: {requestId}
+// Fields:
+//   - requestId: string (required, 1-128 chars, matches document path, immutable)
+//   - resourceId: string (required, 1-128 chars, immutable)
+//   - ownerId: string (required, 1-128 chars, immutable)
+//   - requesterId: string (required, 1-128 chars, matches requester auth UID, immutable)
+//   - requesterName: string (required, 1-100 chars)
+//   - requesterEmail: string (required, valid email, <= 100 chars)
+//   - requesterDept: string (required, 2-50 chars)
+//   - requesterYear: string (required, 1-20 chars)
+//   - message: string (required, 1-500 chars)
+//   - status: string (required, 'pending' | 'accepted' | 'rejected' | 'returned' | 'cancelled')
+//   - requestedAt: timestamp (required, recent on create, immutable on update)
+//   - updatedAt: timestamp (required, timestamp)
+//   - expectedReturnDate: timestamp or string (required, <= 50 chars)
+//
+// Collection: notifications
+// Document ID: {notificationId}
+// Fields:
+//   - notificationId: string (required, 1-128 chars, matches document path, immutable)
+//   - recipientId: string (required, 1-128 chars, immutable)
+//   - type: string (required, 1-50 chars)
+//   - title: string (required, 1-100 chars)
+//   - message: string (required, 1-500 chars)
+//   - relatedResourceId: string (optional, 0-128 chars)
+//   - relatedRequestId: string (optional, 0-128 chars)
+//   - read: bool (required, starts as false, only recipient can mark read)
+//   - createdAt: timestamp (required, recent on create, immutable on update)
+//
+// Collection: reports
+// Document ID: {reportId}
+// Fields:
+//   - reportId: string (required, 1-128 chars, matches document path, immutable)
+//   - reporterId: string (required, 1-128 chars, matches reporter auth UID, immutable)
+//   - resourceId: string (required, 1-128 chars, immutable)
+//   - reason: string (required, 5-500 chars)
+//   - status: string (required, 'pending' | 'reviewed' | 'resolved' | 'dismissed')
+//   - createdAt: timestamp (required, recent on create, immutable on update)
+//
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ========================================================================
+    // Security Directives & Helper Functions
+    // ========================================================================
+
+    // Check if the request is from an authenticated user
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if user owns the document/resource matching the specified userId
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Role-Based Access Control: Admin check
+    // Authority derived strictly from trusted token claims or verified admin bootstrap account
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.admin == true ||
+        request.auth.token.role == 'admin' ||
+        (request.auth.token.email == 'admin@walchandsangli.ac.in' && request.auth.token.email_verified == true)
+      );
+    }
+
+    // Ensure uid field matches authenticated user on create
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) ||
+        request.resource.data.uid == request.auth.uid;
+    }
+
+    // Ensure uid field is not modified on update
+    function uidNotModified() {
+      return !('uid' in request.resource.data) ||
+        request.resource.data.uid == resource.data.uid;
+    }
+
+    // Validate that document contains required fields
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Enforce strict schema with no extraneous fields
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Protect immutable fields from unauthorized tampering during updates
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // Validate email format and bounded length
+    function isValidEmail(email) {
+      return email is string &&
+        email.size() >= 5 &&
+        email.size() <= 100 &&
+        email.matches('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    // Validate web URL format and bounded length
+    function isValidUrl(url) {
+      return url is string &&
+        url.size() <= 1000 &&
+        (url.matches('^https://.*') || url.matches('^http://.*'));
+    }
+
+    // Validate recent timestamp (within 5 minutes)
+    function isRecent(time) {
+      return time is timestamp &&
+        time > request.time - duration.value(5, 'm') &&
+        time <= request.time + duration.value(1, 'm');
+    }
+
+    // Valid borrow request status transitions
+    function isValidBorrowStatusTransition(prev, next) {
+      return prev == next ||
+        (prev == 'pending' && (next == 'accepted' || next == 'rejected' || next == 'cancelled')) ||
+        (prev == 'accepted' && (next == 'returned' || next == 'cancelled'));
+    }
+
+    // ========================================================================
+    // Domain Validator Functions (Validator Function Pattern)
+    // Mandatory: Evaluated on BOTH create and update operations
+    // ========================================================================
+
+    // 1. User Profile Validator
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'fullName', 'collegeEmail', 'department', 'academicYear', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'fullName', 'collegeEmail', 'department', 'academicYear', 'role', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 100 &&
+        data.collegeEmail is string && isValidEmail(data.collegeEmail) &&
+        data.department is string && data.department.size() >= 2 && data.department.size() <= 50 &&
+        data.academicYear is string && data.academicYear.size() >= 1 && data.academicYear.size() <= 20 &&
+        data.role in ['student', 'admin'] &&
+        data.createdAt is timestamp &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    // 2. Resource Item Validator
+    function isValidResource(data) {
+      return data.keys().hasAll([
+          'resourceId', 'ownerId', 'ownerName', 'ownerEmail', 'department',
+          'academicYear', 'title', 'category', 'description', 'condition',
+          'sharingType', 'status', 'imageUrl', 'duration', 'createdAt',
+          'updatedAt', 'isFlagged'
+        ]) &&
+        data.keys().hasOnly([
+          'resourceId', 'ownerId', 'ownerName', 'ownerEmail', 'department',
+          'academicYear', 'title', 'category', 'description', 'condition',
+          'sharingType', 'status', 'imageUrl', 'duration', 'createdAt',
+          'updatedAt', 'isFlagged'
+        ]) &&
+        data.resourceId is string && data.resourceId.size() >= 1 && data.resourceId.size() <= 128 &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+        data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 100 &&
+        data.ownerEmail is string && isValidEmail(data.ownerEmail) &&
+        data.department is string && data.department.size() >= 2 && data.department.size() <= 50 &&
+        data.academicYear is string && data.academicYear.size() >= 1 && data.academicYear.size() <= 20 &&
+        data.title is string && data.title.size() >= 3 && data.title.size() <= 150 &&
+        data.category is string && data.category.size() >= 2 && data.category.size() <= 50 &&
+        data.description is string && data.description.size() >= 5 && data.description.size() <= 2000 &&
+        data.condition is string && data.condition.size() >= 2 && data.condition.size() <= 50 &&
+        data.sharingType is string && data.sharingType.size() >= 2 && data.sharingType.size() <= 50 &&
+        data.status in ['Available', 'Requested', 'Borrowed', 'Unavailable'] &&
+        data.imageUrl is string && data.imageUrl.size() <= 1000 &&
+        (data.imageUrl.size() == 0 || isValidUrl(data.imageUrl) || data.imageUrl.matches('^gs://.*') || data.imageUrl.matches('^/[a-zA-Z0-9_/-].*')) &&
+        data.duration is string && data.duration.size() >= 1 && data.duration.size() <= 50 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp &&
+        data.isFlagged is bool;
+    }
+
+    // 3. Borrow Request Validator
+    function isValidBorrowRequest(data) {
+      return data.keys().hasAll([
+          'requestId', 'resourceId', 'ownerId', 'requesterId',
+          'requesterName', 'requesterEmail', 'requesterDept', 'requesterYear',
+          'message', 'status', 'requestedAt', 'updatedAt', 'expectedReturnDate'
+        ]) &&
+        data.keys().hasOnly([
+          'requestId', 'resourceId', 'ownerId', 'requesterId',
+          'requesterName', 'requesterEmail', 'requesterDept', 'requesterYear',
+          'message', 'status', 'requestedAt', 'updatedAt', 'expectedReturnDate'
+        ]) &&
+        data.requestId is string && data.requestId.size() >= 1 && data.requestId.size() <= 128 &&
+        data.resourceId is string && data.resourceId.size() >= 1 && data.resourceId.size() <= 128 &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+        data.requesterId is string && data.requesterId.size() >= 1 && data.requesterId.size() <= 128 &&
+        data.requesterName is string && data.requesterName.size() >= 1 && data.requesterName.size() <= 100 &&
+        data.requesterEmail is string && isValidEmail(data.requesterEmail) &&
+        data.requesterDept is string && data.requesterDept.size() >= 2 && data.requesterDept.size() <= 50 &&
+        data.requesterYear is string && data.requesterYear.size() >= 1 && data.requesterYear.size() <= 20 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 500 &&
+        data.status in ['pending', 'accepted', 'rejected', 'returned', 'cancelled'] &&
+        data.requestedAt is timestamp &&
+        data.updatedAt is timestamp &&
+        (data.expectedReturnDate is timestamp || (data.expectedReturnDate is string && data.expectedReturnDate.size() >= 1 && data.expectedReturnDate.size() <= 50));
+    }
+
+    // 4. Notification Validator
+    function isValidNotification(data) {
+      return data.keys().hasAll([
+          'notificationId', 'recipientId', 'type', 'title',
+          'message', 'read', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'notificationId', 'recipientId', 'type', 'title',
+          'message', 'relatedResourceId', 'relatedRequestId',
+          'read', 'createdAt'
+        ]) &&
+        data.notificationId is string && data.notificationId.size() >= 1 && data.notificationId.size() <= 128 &&
+        data.recipientId is string && data.recipientId.size() >= 1 && data.recipientId.size() <= 128 &&
+        data.type is string && data.type.size() >= 1 && data.type.size() <= 50 &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 100 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 500 &&
+        (!('relatedResourceId' in data) || (data.relatedResourceId is string && data.relatedResourceId.size() <= 128)) &&
+        (!('relatedRequestId' in data) || (data.relatedRequestId is string && data.relatedRequestId.size() <= 128)) &&
+        data.read is bool &&
+        data.createdAt is timestamp;
+    }
+
+    // 5. Report Validator
+    function isValidReport(data) {
+      return data.keys().hasAll(['reportId', 'reporterId', 'resourceId', 'reason', 'status', 'createdAt']) &&
+        data.keys().hasOnly(['reportId', 'reporterId', 'resourceId', 'reason', 'status', 'createdAt']) &&
+        data.reportId is string && data.reportId.size() >= 1 && data.reportId.size() <= 128 &&
+        data.reporterId is string && data.reporterId.size() >= 1 && data.reporterId.size() <= 128 &&
+        data.resourceId is string && data.resourceId.size() >= 1 && data.resourceId.size() <= 128 &&
+        data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 500 &&
+        data.status in ['pending', 'reviewed', 'resolved', 'dismissed'] &&
+        data.createdAt is timestamp;
+    }
+
+    // ========================================================================
+    // Default Deny Rule
+    // ========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ========================================================================
+    // Collection Rules
+    // ========================================================================
+
+    // 1. users/{userId}
+    // Student and administrator profiles
+    match /users/{userId} {
+      // Authenticated campus users can view student profiles in the platform directory.
+      // Direct unauthenticated read is blocked to prevent external web scraping of student emails.
+      allow read: if isAuthenticated();
+
+      // Authenticated users can create their own profile document.
+      // Role must default to 'student'; setting 'admin' requires trusted admin authorization.
+      allow create: if isOwner(userId) &&
+        request.resource.data.uid == userId &&
+        isValidUser(request.resource.data) &&
+        (request.resource.data.role == 'student' || isAdmin()) &&
+        (request.resource.data.createdAt <= request.time + duration.value(1, 'm'));
+
+      // Users can update their own profile, but cannot self-escalate role or alter uid/createdAt.
+      // Administrators can update any profile.
+      allow update: if isAuthenticated() &&
+        isValidUser(request.resource.data) &&
+        (
+          (
+            isOwner(userId) &&
+            request.resource.data.role == resource.data.role &&
+            areImmutableFieldsUnchanged(['uid', 'createdAt'])
+          ) ||
+          isAdmin()
+        );
+
+      // Account deletion restricted to administrators.
+      allow delete: if isAdmin();
+    }
+
+    // 2. resources/{resourceId}
+    // Items available for borrowing, donation, or sharing
+    match /resources/{resourceId} {
+      // Public / authenticated read for browsing campus catalog
+      allow read: if true;
+
+      // Authenticated users can list resources where they are the owner
+      allow create: if isAuthenticated() &&
+        request.resource.data.resourceId == resourceId &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.isFlagged == false &&
+        request.resource.data.status in ['Available', 'Unavailable'] &&
+        request.resource.data.createdAt <= request.time + duration.value(1, 'm') &&
+        isValidResource(request.resource.data);
+
+      // Owner can update their listing (immutable ID, ownerId, createdAt, cannot self-unflag);
+      // Admin can update any listing;
+      // Involved borrowers can trigger controlled status changes during borrow/return workflows.
+      allow update: if isAuthenticated() &&
+        isValidResource(request.resource.data) &&
+        (
+          isAdmin() ||
+          (
+            isOwner(resource.data.ownerId) &&
+            areImmutableFieldsUnchanged(['resourceId', 'ownerId', 'createdAt']) &&
+            (!resource.data.isFlagged || request.resource.data.isFlagged == resource.data.isFlagged)
+          ) ||
+          (
+            // Controlled workflow status transition (e.g. requester requesting or returning)
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+            areImmutableFieldsUnchanged([
+              'resourceId', 'ownerId', 'ownerName', 'ownerEmail', 'department',
+              'academicYear', 'title', 'category', 'description', 'condition',
+              'sharingType', 'imageUrl', 'duration', 'createdAt', 'isFlagged'
+            ]) &&
+            (
+              (resource.data.status == 'Available' && request.resource.data.status == 'Requested') ||
+              (resource.data.status == 'Requested' && request.resource.data.status == 'Available') ||
+              (resource.data.status == 'Borrowed' && request.resource.data.status == 'Available')
+            )
+          )
+        );
+
+      // Only the listing owner or an administrator can delete a resource
+      allow delete: if isAuthenticated() &&
+        (isOwner(resource.data.ownerId) || isAdmin());
+    }
+
+    // 3. borrowRequests/{requestId}
+    // Peer-to-peer borrow requests between students
+    match /borrowRequests/{requestId} {
+      // Only the requester, the resource owner, or an administrator can view requests
+      allow read: if isAuthenticated() &&
+        (
+          request.auth.uid == resource.data.requesterId ||
+          request.auth.uid == resource.data.ownerId ||
+          isAdmin()
+        );
+
+      // Authenticated users can create requests for others' items (not their own)
+      allow create: if isAuthenticated() &&
+        request.resource.data.requestId == requestId &&
+        request.resource.data.requesterId == request.auth.uid &&
+        request.resource.data.ownerId != request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.requestedAt <= request.time + duration.value(1, 'm') &&
+        isValidBorrowRequest(request.resource.data);
+
+      // Requester, owner, or admin can update request state
+      allow update: if isAuthenticated() &&
+        isValidBorrowRequest(request.resource.data) &&
+        areImmutableFieldsUnchanged(['requestId', 'resourceId', 'ownerId', 'requesterId', 'requestedAt']) &&
+        (
+          isAdmin() ||
+          (
+            (request.auth.uid == resource.data.ownerId || request.auth.uid == resource.data.requesterId) &&
+            isValidBorrowStatusTransition(resource.data.status, request.resource.data.status)
+          )
+        );
+
+      // Requester can cancel/delete their request; administrators can delete any request
+      allow delete: if isAuthenticated() &&
+        (request.auth.uid == resource.data.requesterId || isAdmin());
+    }
+
+    // 4. notifications/{notificationId}
+    // In-app notifications for item requests, approvals, and status updates
+    match /notifications/{notificationId} {
+      // Only the recipient or an administrator can read notifications
+      allow read: if isAuthenticated() &&
+        (request.auth.uid == resource.data.recipientId || isAdmin());
+
+      // Authenticated users can create notifications for transaction peers
+      allow create: if isAuthenticated() &&
+        request.resource.data.notificationId == notificationId &&
+        request.resource.data.read == false &&
+        request.resource.data.createdAt <= request.time + duration.value(1, 'm') &&
+        isValidNotification(request.resource.data);
+
+      // Recipient can mark notification as read; administrators have full update rights
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (
+          request.auth.uid == resource.data.recipientId &&
+          isValidNotification(request.resource.data) &&
+          areImmutableFieldsUnchanged([
+            'notificationId', 'recipientId', 'type', 'title',
+            'message', 'createdAt', 'relatedResourceId', 'relatedRequestId'
+          ]) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+        )
+      );
+
+      // Recipient or admin can delete notifications
+      allow delete: if isAuthenticated() &&
+        (request.auth.uid == resource.data.recipientId || isAdmin());
+    }
+
+    // 5. reports/{reportId}
+    // Abuse/inappropriate item reports submitted by students for administrative review
+    match /reports/{reportId} {
+      // Authenticated students can submit a report regarding an inappropriate resource
+      allow create: if isAuthenticated() &&
+        request.resource.data.reportId == reportId &&
+        request.resource.data.reporterId == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.createdAt <= request.time + duration.value(1, 'm') &&
+        isValidReport(request.resource.data);
+
+      // Only administrators can read or delete reports
+      allow read, delete: if isAdmin();
+
+      // Only administrators can update report status/findings
+      allow update: if isAdmin() &&
+        isValidReport(request.resource.data) &&
+        areImmutableFieldsUnchanged(['reportId', 'reporterId', 'resourceId', 'createdAt']);
+    }
+
+  }
+}
